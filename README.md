@@ -40,7 +40,7 @@ TfL Unified API (all 11 tube lines)
 - TfL API key (register at https://api-portal.tfl.gov.uk/)
 - Snowflake CLI (`snow`) installed locally
 - Docker (for building the ingestion container)
-- Python 3.11+ with `snowflake-snowpark-python` and `requests`
+- No account-level network policy blocking SPCS internal IPs (see Known Issues below)
 
 ## Setup
 
@@ -57,14 +57,19 @@ ALTER SECRET TFL_DEMO.PUBLIC.TFL_API_KEY SET SECRET_STRING = '<your-key>';
 
 ### 2. Load reference data
 
-```bash
-cd reference
-export TFL_API_KEY=<your-key>
-python load_reference_data.py
+Reference data is loaded via a stored procedure that fetches from TfL API:
+
+```sql
+-- First, upload the Python source to the code stage:
+-- snow stage copy reference/load_reference_data.py @TFL_DEMO.PUBLIC.CODE_STAGE/reference/ --overwrite
+
+-- Create the procedure (see setup.sql for full DDL)
+-- Then call it:
+CALL TFL_DEMO.PUBLIC.LOAD_REFERENCE_DATA();
 ```
 
 This fetches station coordinates and line route polylines from TfL and loads them
-into `REF_STATIONS`, `REF_LINES`, and `REF_LINE_ROUTES`.
+into `REF_STATIONS` (384 stations), `REF_LINES` (11 lines), and `REF_LINE_ROUTES` (66 routes).
 
 ### 3. Build and push the ingestion container
 
@@ -75,20 +80,61 @@ cd ingest
 snow spcs image-registry url
 # e.g. org-account.registry.snowflakecomputing.com
 
+# Build for linux/amd64 (required for SPCS)
 docker build --platform linux/amd64 -t tfl_ingest:latest .
 docker tag tfl_ingest:latest <registry>/tfl_demo/public/images/tfl_ingest:latest
-docker login <registry>
+
+# Login using Snowflake CLI (not username/password)
+snow spcs image-registry login
+
+# Push
 docker push <registry>/tfl_demo/public/images/tfl_ingest:latest
 ```
 
-### 4. Create the Dynamic Table and Task
+### 4. Create the Dynamic Table
 
-Edit `pipeline.sql` to fill in your account details, then:
 ```bash
 snow sql -f pipeline.sql
 ```
 
-### 5. Deploy the Streamlit dashboard
+### 5. Run ingestion
+
+```sql
+EXECUTE JOB SERVICE
+    IN COMPUTE POOL TFL_POOL
+    NAME = TFL_INGEST_JOB
+    EXTERNAL_ACCESS_INTEGRATIONS = (TFL_API_ACCESS)
+    ASYNC = TRUE
+    FROM SPECIFICATION $$
+spec:
+  containers:
+    - name: tfl-ingest
+      image: /tfl_demo/public/images/tfl_ingest:latest
+      env:
+        TFL_API_KEY: "<your-key>"
+        SNOWFLAKE_ACCOUNT: "<org-account>"
+        SNOWFLAKE_HOST: "<locator>.<region>.aws.snowflakecomputing.com"
+        SNOWFLAKE_ROLE: "SYSADMIN"
+        SNOWFLAKE_DATABASE: "TFL_DEMO"
+        SNOWFLAKE_SCHEMA: "PUBLIC"
+        PIPE_NAME: "RAW_ARRIVALS_PIPE"
+      resources:
+        requests:
+          memory: 256M
+          cpu: "0.5"
+        limits:
+          memory: 512M
+          cpu: "1"
+capabilities:
+  securityContext:
+    enableCustomCredentials: true
+$$;
+```
+
+**Important:** Use the regional host format (e.g. `mr31655.eu-west-2.aws.snowflakecomputing.com`),
+not the org-account format with underscores (which fails DNS resolution inside SPCS).
+
+### 6. Deploy the Streamlit dashboard
 
 ```bash
 cd streamlit
@@ -99,40 +145,22 @@ snow streamlit deploy \
     --replace
 ```
 
-Or create manually:
-```sql
-CREATE STAGE IF NOT EXISTS TFL_DEMO.PUBLIC.STREAMLIT_STAGE DIRECTORY = (ENABLE = TRUE);
--- Upload files to stage, then:
-CREATE OR REPLACE STREAMLIT TFL_DEMO.PUBLIC.TUBE_TRACKER
-    ROOT_LOCATION = '@TFL_DEMO.PUBLIC.STREAMLIT_STAGE'
-    MAIN_FILE = 'streamlit_app.py'
-    QUERY_WAREHOUSE = COMPUTE_WH;
-```
-
-### 6. Start the ingestion task
-
-Uncomment the task in `pipeline.sql` and run it, or execute manually:
-```sql
-EXECUTE SERVICE
-    IN COMPUTE POOL TFL_POOL
-    FROM SPECIFICATION $$ ... $$
-    EXTERNAL_ACCESS_INTEGRATIONS = (TFL_API_ACCESS);
-```
-
 ## Verification
 
 ```sql
 -- Check raw data is flowing
-SELECT COUNT(*) FROM TFL_DEMO.PUBLIC.RAW_ARRIVALS;
+SELECT COUNT(*), COUNT(DISTINCT INGESTION_ID) AS batches
+FROM TFL_DEMO.PUBLIC.RAW_ARRIVALS;
 
 -- Check dynamic table has positioned trains
-SELECT COUNT(*), COUNT(DISTINCT VEHICLE_ID)
+SELECT COUNT(*), COUNT(DISTINCT LINE_ID) AS lines
 FROM TFL_DEMO.PUBLIC.TRAIN_POSITIONS;
 
 -- Sample positioned trains
 SELECT LINE_NAME, VEHICLE_ID, CURRENT_LOCATION, LATITUDE, LONGITUDE
 FROM TFL_DEMO.PUBLIC.TRAIN_POSITIONS
-LIMIT 20;
+WHERE LINE_ID = 'victoria'
+LIMIT 10;
 ```
 
 ## Teardown
@@ -149,6 +177,7 @@ snowflake-tfl-live/
 ├── setup.sql              All Snowflake DDL (idempotent)
 ├── pipeline.sql           Dynamic Table + Task definitions
 ├── teardown.sql           Clean removal of all objects
+├── SKILL.md               CoCo skill for end-to-end deployment
 ├── ingest/
 │   ├── Dockerfile
 │   ├── requirements.txt
@@ -156,14 +185,58 @@ snowflake-tfl-live/
 │   └── tfl_ingest.py      Ingestion script (TfL → SSv2)
 ├── reference/
 │   ├── line_colours.json  Static line colour metadata
-│   └── load_reference_data.py  One-time reference data loader
+│   └── load_reference_data.py  Stored procedure source
 └── streamlit/
     ├── environment.yml    Snowflake Anaconda dependencies
     └── streamlit_app.py   Dashboard with pydeck map
 ```
 
+## Known Issues
+
+### Network policy blocks SSv2 from SPCS
+
+If your account has an account-level network policy with an IP allowlist, the SSv2 ingest
+endpoint (`*.ingest.lhrasq.snowflakecomputing.com`) will reject requests from SPCS containers
+with error 390422 ("IP/Token not allowed to access Snowflake").
+
+**Workarounds attempted (none work):**
+- Adding `10.0.0.0/8` to the policy's allowed list
+- Setting a permissive user-level network policy on the service owner
+
+**Current workaround:** Unset the account-level network policy (`ALTER ACCOUNT UNSET NETWORK_POLICY`).
+
+This has been reported to the SSv2/SPCS team for a proper fix.
+
+### Docker registry login
+
+Use `snow spcs image-registry login` for authentication — username/password login does not work.
+The CLI handles token-based auth automatically.
+
+### SNOWFLAKE_HOST format
+
+Inside SPCS, use the regional locator format for `SNOWFLAKE_HOST`:
+- Correct: `mr31655.eu-west-2.aws.snowflakecomputing.com`
+- Wrong: `sfseeurope-jkinley_aws.snowflakecomputing.com` (underscore fails DNS)
+
+Get your locator with: `SELECT CURRENT_ACCOUNT()` and check `SYSTEM$ALLOWLIST()` for the
+`SNOWFLAKE_DEPLOYMENT` host entry.
+
+### External Access Integration requires ALLOWED_AUTHENTICATION_SECRETS
+
+When creating an EAI that will be used with stored procedures referencing secrets, you must
+include `ALLOWED_AUTHENTICATION_SECRETS` in the integration definition:
+
+```sql
+CREATE EXTERNAL ACCESS INTEGRATION TFL_API_ACCESS
+    ALLOWED_NETWORK_RULES = (TFL_API_RULE)
+    ALLOWED_AUTHENTICATION_SECRETS = (TFL_API_KEY)  -- Required!
+    ENABLED = TRUE;
+```
+
 ## Future work
 
+- Streamlit-in-Snowflake deployment (pydeck map)
+- Scheduled Task for continuous ingestion (every 60s)
 - Semantic model over `TRAIN_POSITIONS` for Cortex Analyst
 - Cortex Agent for natural language tube queries and journey planning
 - Historical analytics (delay patterns, service reliability)

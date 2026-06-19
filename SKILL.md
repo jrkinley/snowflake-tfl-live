@@ -135,19 +135,35 @@ WHERE TABLE_SCHEMA = 'PUBLIC' AND TABLE_CATALOG = 'TFL_DEMO';
 
 ### Step 2 — Load reference data
 
-Install dependencies and run the loader:
+Reference data is loaded via a stored procedure. First, upload the Python source:
 
 ```bash
-cd /Users/jkinley/code/snowflake-tfl-live/reference
-pip install snowflake-snowpark-python requests
-export TFL_API_KEY=<key>
-python load_reference_data.py
+cd /Users/jkinley/code/snowflake-tfl-live
+snow stage copy reference/load_reference_data.py @TFL_DEMO.PUBLIC.CODE_STAGE/reference/ --overwrite
+```
+
+Then create and call the procedure:
+
+```sql
+CREATE OR REPLACE PROCEDURE TFL_DEMO.PUBLIC.LOAD_REFERENCE_DATA()
+    RETURNS STRING
+    LANGUAGE PYTHON
+    RUNTIME_VERSION = '3.11'
+    PACKAGES = ('snowflake-snowpark-python', 'requests')
+    IMPORTS = ('@TFL_DEMO.PUBLIC.CODE_STAGE/reference/load_reference_data.py')
+    EXTERNAL_ACCESS_INTEGRATIONS = (TFL_API_ACCESS)
+    SECRETS = ('tfl_api_key' = TFL_DEMO.PUBLIC.TFL_API_KEY)
+    HANDLER = 'load_reference_data.run'
+    EXECUTE AS CALLER;
+
+CALL TFL_DEMO.PUBLIC.LOAD_REFERENCE_DATA();
+-- Expected output: "Reference data loaded: 384 stations, 66 routes, 11 lines"
 ```
 
 Verify:
 ```sql
 SELECT COUNT(*) AS station_count FROM TFL_DEMO.PUBLIC.REF_STATIONS;
--- Expected: ~270+ rows
+-- Expected: ~384 rows
 
 SELECT * FROM TFL_DEMO.PUBLIC.REF_LINES;
 -- Expected: 11 rows (one per tube line)
@@ -169,9 +185,13 @@ echo "Registry: $REGISTRY"
 # Build for linux/amd64 (required for SPCS)
 docker build --platform linux/amd64 -t tfl_ingest:latest .
 
-# Tag and push
+# Tag
 docker tag tfl_ingest:latest ${REGISTRY}/tfl_demo/public/images/tfl_ingest:latest
-docker login ${REGISTRY}
+
+# Login using Snowflake CLI (username/password does NOT work)
+snow spcs image-registry login
+
+# Push
 docker push ${REGISTRY}/tfl_demo/public/images/tfl_ingest:latest
 ```
 
@@ -442,13 +462,60 @@ DROP TABLE IF EXISTS TFL_DEMO.PUBLIC.REF_LINE_ROUTES;
 
 ## Common issues
 
+### Network policy blocks SSv2 from SPCS (error 390422)
+
+If your account has an account-level network policy, the SSv2 ingest endpoint
+(`*.ingest.lhrasq.snowflakecomputing.com`) will reject SPCS container requests with:
+`"Incoming request with IP/Token 10.x.x.x is not allowed to access Snowflake"`
+
+**Workarounds that do NOT work:**
+- Adding `10.0.0.0/8` to the policy's allowed list
+- Setting a permissive user-level network policy on the service owner user
+
+**Working workaround:** Unset the account-level network policy:
+```sql
+ALTER ACCOUNT UNSET NETWORK_POLICY;
+```
+
+This is a known product gap — SPCS internal traffic to the SSv2 ingest endpoint is not
+exempted from account-level network policies. Reported to the SSv2/SPCS team.
+
+### SNOWFLAKE_HOST DNS resolution fails inside SPCS
+
+Use the **regional locator format** for `SNOWFLAKE_HOST`, not the org-account format:
+- Correct: `mr31655.eu-west-2.aws.snowflakecomputing.com`
+- Wrong: `sfseeurope-jkinley_aws.snowflakecomputing.com` (underscore breaks DNS)
+
+Find your locator: `SELECT CURRENT_ACCOUNT()` and check `SYSTEM$ALLOWLIST()` for the
+`SNOWFLAKE_DEPLOYMENT` entry.
+
+### Docker registry login fails with username/password
+
+Use the Snowflake CLI instead:
+```bash
+snow spcs image-registry login
+```
+
+### EAI requires ALLOWED_AUTHENTICATION_SECRETS
+
+When using secrets in stored procedures with an EAI, you must include:
+```sql
+CREATE EXTERNAL ACCESS INTEGRATION TFL_API_ACCESS
+    ALLOWED_NETWORK_RULES = (TFL_API_RULE)
+    ALLOWED_AUTHENTICATION_SECRETS = (TFL_API_KEY)  -- Required!
+    ENABLED = TRUE;
+```
+
+Without this, `CREATE PROCEDURE ... SECRETS = (...)` will fail with
+"Integrations do not allow secret".
+
 ### "Compute pool not ready"
 The compute pool may take 1-2 minutes to start on first use. Check status:
 ```sql
 DESCRIBE COMPUTE POOL TFL_POOL;
 ```
 
-### "Network rule blocked"
+### "Network rule blocked" (TfL API egress)
 Ensure the External Access Integration is enabled and the network rule allows `api.tfl.gov.uk:443`.
 
 ### "No data in TRAIN_POSITIONS"

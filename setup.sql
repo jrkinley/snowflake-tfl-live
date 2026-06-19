@@ -93,15 +93,22 @@ CREATE NETWORK RULE IF NOT EXISTS TFL_API_RULE
     MODE = EGRESS
     VALUE_LIST = ('api.tfl.gov.uk:443');
 
--- External access integration
+-- External access integration (requires ACCOUNTADMIN)
+-- USE ROLE ACCOUNTADMIN;
 CREATE EXTERNAL ACCESS INTEGRATION IF NOT EXISTS TFL_API_ACCESS
     ALLOWED_NETWORK_RULES = (TFL_DEMO.PUBLIC.TFL_API_RULE)
+    ALLOWED_AUTHENTICATION_SECRETS = (TFL_DEMO.PUBLIC.TFL_API_KEY)
     ENABLED = TRUE;
+-- USE ROLE SYSADMIN;
 
 -- Secret for TfL API key (replace with your actual key)
 CREATE SECRET IF NOT EXISTS TFL_API_KEY
     TYPE = GENERIC_STRING
     SECRET_STRING = '<REPLACE_WITH_YOUR_TFL_API_KEY>';
+
+-- Code stage for Python source files
+CREATE STAGE IF NOT EXISTS CODE_STAGE
+    DIRECTORY = (ENABLE = TRUE);
 
 -- -----------------------------------------------------------------------------
 -- Streamlit stage
@@ -110,9 +117,18 @@ CREATE STAGE IF NOT EXISTS STREAMLIT_STAGE
     DIRECTORY = (ENABLE = TRUE);
 
 -- -----------------------------------------------------------------------------
--- Grants (adjust role as needed)
+-- Stored procedure: load reference data from TfL API
+-- Upload load_reference_data.py to @CODE_STAGE/reference/ first:
+--   snow stage copy reference/load_reference_data.py @TFL_DEMO.PUBLIC.CODE_STAGE/reference/ --overwrite
+-- Then create the procedure:
 -- -----------------------------------------------------------------------------
-GRANT USAGE ON DATABASE TFL_DEMO TO ROLE SYSADMIN;
-GRANT USAGE ON SCHEMA TFL_DEMO.PUBLIC TO ROLE SYSADMIN;
-GRANT ALL ON ALL TABLES IN SCHEMA TFL_DEMO.PUBLIC TO ROLE SYSADMIN;
-GRANT ALL ON ALL PIPES IN SCHEMA TFL_DEMO.PUBLIC TO ROLE SYSADMIN;
+-- CREATE OR REPLACE PROCEDURE LOAD_REFERENCE_DATA()
+--     RETURNS STRING
+--     LANGUAGE PYTHON
+--     RUNTIME_VERSION = '3.11'
+--     PACKAGES = ('snowflake-snowpark-python', 'requests')
+--     IMPORTS = ('@TFL_DEMO.PUBLIC.CODE_STAGE/reference/load_reference_data.py')
+--     EXTERNAL_ACCESS_INTEGRATIONS = (TFL_API_ACCESS)
+--     SECRETS = ('tfl_api_key' = TFL_DEMO.PUBLIC.TFL_API_KEY)
+--     HANDLER = 'load_reference_data.run'
+--     EXECUTE AS CALLER;
