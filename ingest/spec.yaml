@@ -1,0 +1,24 @@
+spec:
+  containers:
+    - name: tfl-ingest
+      image: /tfl_demo/public/images/tfl_ingest:latest
+      env:
+        TFL_API_KEY: ""
+        SNOWFLAKE_ACCOUNT: ""
+        SNOWFLAKE_HOST: ""
+        SNOWFLAKE_ROLE: "SYSADMIN"
+        SNOWFLAKE_DATABASE: "TFL_DEMO"
+        SNOWFLAKE_SCHEMA: "PUBLIC"
+        PIPE_NAME: "RAW_ARRIVALS_PIPE"
+        CHANNEL_NAME: "tfl-ingest-channel"
+      resources:
+        requests:
+          memory: 256M
+          cpu: "0.5"
+        limits:
+          memory: 512M
+          cpu: "1"
+  endpoints: []
+capabilities:
+  securityContext:
+    enableCustomCredentials: true

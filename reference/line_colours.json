@@ -1,0 +1,13 @@
+{
+    "bakerloo":        {"name": "Bakerloo",           "hex": "#B36305", "r": 179, "g": 99,  "b": 5},
+    "central":         {"name": "Central",            "hex": "#E32017", "r": 227, "g": 32,  "b": 23},
+    "circle":          {"name": "Circle",             "hex": "#FFD300", "r": 255, "g": 211, "b": 0},
+    "district":        {"name": "District",           "hex": "#00782A", "r": 0,   "g": 120, "b": 42},
+    "hammersmith-city": {"name": "Hammersmith & City", "hex": "#F3A9BB", "r": 243, "g": 169, "b": 187},
+    "jubilee":         {"name": "Jubilee",            "hex": "#A0A5A9", "r": 160, "g": 165, "b": 169},
+    "metropolitan":    {"name": "Metropolitan",       "hex": "#9B0056", "r": 155, "g": 0,   "b": 86},
+    "northern":        {"name": "Northern",           "hex": "#000000", "r": 0,   "g": 0,   "b": 0},
+    "piccadilly":      {"name": "Piccadilly",         "hex": "#003688", "r": 0,   "g": 54,  "b": 136},
+    "victoria":        {"name": "Victoria",           "hex": "#0098D4", "r": 0,   "g": 152, "b": 212},
+    "waterloo-city":   {"name": "Waterloo & City",    "hex": "#95CDBA", "r": 149, "g": 205, "b": 186}
+}
